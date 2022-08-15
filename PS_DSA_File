@@ -1,0 +1,61 @@
+######################################################
+# Script: PasswordSafeDSA.ps1
+# Created By: Heather Dewberry
+# Creation Date: 7/14/2022
+# Description: Create the Password Safe DSA File to be uploaded in myAccess
+# This script will connect to the Password Safe API and pull the users from the Admin Group and output the DSA File
+#######################################################
+
+# *** COMMAND LINE ARGS
+# When running the script pass in either prod, stage, or test as the environment
+param(
+    [Parameter(Mandatory)]
+    [string]$env
+)
+
+
+Import-Module 'D:\PBPS\DSA\PasswordSafe\APIModule.psm1' -Force
+
+# *** MAIN ENTRY
+# Output the provided environment and retrieve the appropriate API Key
+Write-Host "Initializing ED Linker... linking in $env environment"
+switch($env) {
+    'prod' {API-RetrieveKey -env 'prod'; Write-Host "Retrieving key for prod..."}
+    'stage' {API-RetrieveKey -env 'stage'; Write-Host "Retrieving key for stage..."}
+    'test' {API-RetrieveKey -env 'test'; Write-Host "Retrieving key for test..."}
+    Default {Write-Host "Env must be either prod, stage, or test"; Exit}
+}
+
+$Outfile = "\\dm0001.info53.com\53Shares\Applications\IdentityIQ\IAMFeeds\Prod\io\incoming\PA3092\PasswordSafeDSA.csv"
+$OutData = @()
+
+# Sign the App in to the API
+API-SignAppin -env $env
+
+# Get the Users in the environment
+Write-Host "Getting Users for $env environment..."
+$users = API-RestMethod -env $env -endpoint 'Users' -method 'GET'
+
+# Get the Groups in the environment
+Write-Host "Getting Groups for $env environment..."
+$groups = API-RestMethod -env $env -endpoint 'UserGroups' -method 'GET'
+
+# Process the User Groups and find groups that match 'Administrators'
+Write-Host "Identifying User Groups that match Administrators"
+foreach ($group in $groups) {
+    if ($group.Name -eq 'Administrators') {
+        $adminGroupID = $group.GroupID
+        $adminGroupMembers = API-RestMethod -env $env -endpoint "UserGroups/$adminGroupID/Users" -method GET
+        $privilegeUser = $adminGroupMembers.UserName -match "^[aet].\d{3,6}"
+        foreach ($admin in $privilegeUser)
+        {
+        $privUserOutput = $admin +",AdminPasswordSafe"
+        $OutData += $privUserOutput
+        $OutData | Out-File $Outfile
+       }
+
+      }
+    }
+
+# Sign the App out of the API
+API-Signout -env $env

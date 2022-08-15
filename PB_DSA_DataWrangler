@@ -1,0 +1,217 @@
+<############################################################################################
+Title: DSA Automation Report
+Description: This script creates the DSA report from 6 different files
+Created by: Jenita Raval, Heather Dewberry and Tran Day
+Created on: 07/19/2021
+Revisions: 1.0
+#############################################################################################> 
+
+#Get the Password from the Safe for the account pamscrpt
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$baseUrl = "https://passwordsafe.info53.com/BeyondTrust/api/public/v3/";
+
+$apiKey = "a26f5d6783beb6946ff7ae7977db7fd5907fffdc1ca4bc0ca69c85aa465e75e7067a9bdd196dde0bf4afdf91c5a3209694fb5e06a219c68b3fb0035a48feb65f"; 
+$runAsUser = "apiinfosec";
+
+$systemToFind="slpbrar001"
+$accountToFind="pamscrpt"
+$headers = @{ Authorization="PS-Auth key=${apiKey}; runas=${runAsUser}";};
+
+$Outfile = "D:\PBPS\DSA\Out\PowerBrokerDSA.csv"
+$FinalFile = "D:\PBPS\DSA\Out\FinalPowerBrokerDSA.csv"
+$regex = "^[aet].\d{3,6}|^ua.\d{3,6}"
+
+try
+{
+     #Sign-In
+     if ($verbose) { "Signing-in.."; }
+     $signInResult = Invoke-RestMethod -Uri "${baseUrl}Auth/SignAppIn" -Method POST -Headers $headers -SessionVariable session;   
+     if ($verbose) { "..Signed-in as {0}" -f $signInResult.UserName;  ""; }
+}
+catch
+{    "";"Exception:";
+    if ($verbose)
+    {$_.Exception
+        $_.Exception | Format-List -Force;
+    }
+    else
+    {
+        $_.Exception.GetType().FullName;
+        $_.Exception.Message;
+    }
+}
+$ma = Invoke-RestMethod -Uri "${baseUrl}ManagedAccounts?systemName=${systemToFind}&accountName=${accountToFind}" -Method Get -WebSession $session;
+$body = @{
+AccessType='View';
+SystemId=$ma.SystemId;
+AccountId=$ma.AccountId;
+DurationMinutes=5;
+ConflictOption='reuse';
+} | ConvertTo-Json
+$requestid = Invoke-RestMethod -Uri "${baseUrl}Requests" -Body $body -ContentType "application/json" -Method Post -WebSession $session;
+$passwd = Invoke-RestMethod -Uri "${baseUrl}Credentials/$requestid" -Method GET -WebSession $session;
+
+
+#Get all 6 config files from the server and  opy them to to our local server in D:\PBPS\DSA\In
+
+pscp -pw $passwd pamscrpt@slpbrar001:/home/pamscrpt/audit.conf "D:\PBPS\DSA\In"
+pscp -pw $passwd pamscrpt@slpbrar001:/home/pamscrpt/cmdas.conf "D:\PBPS\DSA\In"
+pscp -pw $passwd pamscrpt@slpbrar001:/home/pamscrpt/edm.conf "D:\PBPS\DSA\In"
+pscp -pw $passwd pamscrpt@slpbrar001:/home/pamscrpt/io_logging.conf "D:\PBPS\DSA\In"
+pscp -pw $passwd pamscrpt@slpbrar001:/home/pamscrpt/untildate.conf "D:\PBPS\DSA\In"
+pscp -pw $passwd pamscrpt@slpbrar001:/home/pamscrpt/users.conf "D:\PBPS\DSA\In"
+
+#Import CSV
+$AuditFile = Get-Content "D:\PBPS\DSA\In\audit.conf" | Select-String -Pattern 'adminusers=' 
+$CmdasFile = Get-Content "D:\PBPS\DSA\In\cmdas.conf"
+$UserConfig = Get-Content "D:\PBPS\DSA\In\users.conf"
+$edm = Get-Content "D:\PBPS\DSA\In\edm.conf"
+$untildateFile = Get-Content "D:\PBPS\DSA\In\untildate.conf"
+$io_logging = "D:\PBPS\DSA\In\io_logging.conf"
+
+#Variable objects to store files' data
+$loggingdata = Import-Csv $io_logging -Header 'column'
+$OutData = @()
+
+#Loop through values, create string and add to data variables
+#looping through Users file
+foreach ($user in $UserConfig) {
+if ($user -like 'acct_*'){
+    $newUser = $user.Split(' ({""}) ,;', [System.StringSplitOptions]::RemoveEmptyEntries)
+    #Pull out all A,E and T ID's
+    if ($newUser -match "^[aet].\d{3,6}|^ua.\d{3,6}") {
+        $user = "$($newUser[1]),su to $($newUser[3]) on $($newUser[2])"
+        $OutData += $user
+    }
+    }
+}
+
+#looping through CMDAS file
+foreach ($Value in $CmdasFile) {
+if ($Value -like 'cmd_*'){
+    $RowValue = $Value.Split(' ({""}) ,;', [System.StringSplitOptions]::RemoveEmptyEntries)
+    #Pull out all A,E and T ID's
+    if ($RowValue[1] -match "^[aet].\d{3,6}|^ua.\d{3,6}") {
+        $cmdOutData = "$($RowValue[1]),run command $($RowValue[4]) on $($RowValue[2]) as $($RowValue[3])"
+        $OutData += $cmdOutData    }
+    }
+}
+
+#Loop through audit file
+#Pull out all A,E and T ID's for Audit.Config
+Foreach ($AdminUsers in $AuditFile) {
+    # break down adminusers into an array
+    $Users = $AdminUsers.ToString().Split(' ({""}) ,;', [System.StringSplitOptions]::RemoveEmptyEntries)
+    # loop through array and set = to $users
+    foreach ($User in $Users) {
+        if ($User -match "^[aet].\d{3,6}|^ua.\d{3,6}") {
+            $auditdata = "$($User),Audit IT"
+            $OutData += $auditdata
+        }
+    }
+}
+
+#looping through edm
+foreach ($edmUser in $edm) {
+if ($edmUser -like 'edm_acct*'){
+    $edmNewUser = $edmUser.Split(' ({""}) ,;', [System.StringSplitOptions]::RemoveEmptyEntries)
+    #Pull out all A,E and T ID's
+    if ($edmNewUser -match "^[aet].\d{3,6}|^ua.\d{3,6}") {
+        $edmOutput = "$($edmNewUser[1]),su to $($edmNewUser[3]) on $($edmNewUser[2])"
+        $OutData += $edmOutput
+    }
+    }
+}
+
+#Untildate File
+# Loop through rows
+for ($index = 0; $index -le $untildateFile.Length; $index++) {
+    # Write-Output $rowData
+      if ($untildateFile[$index] -match "adminusers=") {
+        $adminUsers = $untildateFile[$index].Replace('adminusers={', "").Replace('""', "").Replace('""', "").Replace('};', "").Split(',').Replace('"', "").Replace('#', "")
+        foreach ($user in $adminUsers){
+          # Check if user is admin A, E, T
+          if ($user -match  "^[aet].\d{3,6}|^ua.\d{3,6}") {
+            $sharedacct = $untildateFile[$index + 2].Replace('sharedacct={', "").Replace('switchacct',"").Replace('=',"").Replace('{',"").Replace('""', "").Replace('""', "").Replace('};', "").Split(',').Replace('"', "").Replace('#', "")   
+            if ($untildateFile[$index + 1] -match "allowedboxes=") {
+              $allowedBoxes = $untildateFile[$index + 1].Replace('allowedboxes={', "").Replace('""', "").Replace('""', "").Replace('};', "").Split(',').Replace('"', "").Replace('#', "")   
+            }
+              foreach ($server in $allowedBoxes) {
+                 
+                  $OutRow = $user +",su to " + $sharedacct + " on " + $server
+                  $OutData += $OutRow
+                }
+               
+          }
+            
+      }        
+    }
+  }  
+#io_logging File
+$line = 0
+foreach ($row in $loggingdata)
+{
+    if ($row -match "function")  { break}
+    else {$line+=1}
+
+
+}
+
+$loggingdata = $loggingdata | Select-Object -Skip $line
+
+$flag=0
+foreach ($row in $loggingdata)
+{
+    if ($NextRow -eq $true)
+    {
+    
+    if ($row -match "adminusers={")
+    {
+        $Users = $row.Column.Split('=')[1].replace('{','').replace('}','').replace(';','').replace('"','').Split(",")
+
+        foreach ($UserID in $Users)
+        {
+            $UserID = $UserID.Trim()
+            if ([string]::IsNullOrEmpty($UserID))
+            {Continue}
+            $OutRow = $UserID.Trim()+", "+$Rulename
+            #outrow
+            $OutData += $OutRow
+            $flag=1
+        }
+
+
+        if($flag=1)
+         {
+           
+            $flag=0
+        }
+
+    }
+
+    else {  $NextRow = $false}
+
+}
+
+if ($row -match '#[A-Za-z]')
+ {
+ $NextRow = $true
+ $Rulename = $row.Column.Split('[-(]')[0].replace("#",'')
+  }
+
+ else { $NextRow = $false}
+
+}
+#exporting output data
+$OutData | Out-File $Outfile
+
+#Get all of the data from the PowerBrokerDSA File, sort the file and remove duplicates
+$filter = Get-Content $Outfile | sort | get-unique
+
+#Filter the PowerBrokerDSA file for all those rules that start with A, E, T and UA accounts
+$regexFilter = $filter -match $regex
+
+#Remove the space from the username to the rule name
+$regexFilter.replace(', ',',').replace('  ',' ').replace('  ',' ') > $FinalFile

@@ -1,0 +1,118 @@
+Import-Module '\\s1flokydcisap03\PBPS\Prod Migration\REALLYGENERIC.ps1'
+
+#Prod environment Data
+$baseUrl = "https://soflokydcpama01.info53.com/BeyondTrust/api/public/v3/";
+$apiKey = "a26f5d6783beb6946ff7ae7977db7fd5907fffdc1ca4bc0ca69c85aa465e75e7067a9bdd196dde0bf4afdf91c5a3209694fb5e06a219c68b3fb0035a48feb65f";
+
+#Step1: Get reports needed for the KRI
+$PamReport= Import-Csv "D:\Reports\PAM\PAIRRptNoDUP.csv" | Select samaccountname, Enabled, "Account Created", pwdLastSet, lastlogonDate
+$CioReport = Import-Csv "D:\PBPS\KRI\CIO.csv" | Select "First Name", "Last Name", Manager, Username, "Division VP", "Divison VP Name"
+#$Domain1 = Import-Csv "D:\PBPS\KRI\Functional Account Owner Report DM0001 .csv" | Select "Account Owner", Username
+#$Domain7 = Import-Csv "D:\PBPS\KRI\Functional Account Owner Report DM0007.csv" | Select "Account Owner", Username
+$FunctionalAccountReport = Import-Csv "D:\PBPS\KRI\FunctionalAccounts.csv" | Select IIQ_IDENTITY, CMDB_APP_MANAGER
+$SurveyReport= Import-Csv "D:\PBPS\KRI\Survey Report.csv"
+$ArcherException = Import-Csv "D:\PBPS\KRI\Archer Exception .csv"
+
+#Pull down accounts from Safe below
+$ManagedAccounts= @()
+#Sign into prod environment
+PSafe-SignAppin
+#Pulls down Managed Account information
+$ManagedSystems= PSafe-Get "managedsystems" 
+$MsIDs= $ManagedSystems|Select-Object -ExpandProperty ManagedSystemID
+foreach($MsID in $MsIDs){
+$ManagedAccounts+= Psafe-get "managedsystems/$MsID/ManagedAccounts"
+}
+psafe-post "auth/signout"
+
+# Step2: Filter through data and create report
+$KriReport= @()
+
+foreach($Account in $PamReport){
+# Create table row template
+$TableRow = [pscustomobject]@{
+  "Domain" = "dm0001"
+  "name" = $null
+  "samaccountname" = $null
+  "Enabled" = $false
+  "Account Created" = $null
+  "Account Owner" = $null
+  "CIO Direct"  = $null
+  "Vaulted" = $null
+  "Auto-Managed" = $null
+  #"API-Enabled" = $null
+  "Password Rule" = $null
+  #"Last Rotation" = $null
+  "Account Type" = $null
+  "Archer Exception" = $null
+  }
+# Check for FA accounts only
+If(!($Account.samaccountname -match "^[AaEeTt].\d{3,6}") -and $Account.Enabled){
+    # Set FA in table row
+    $TableRow."name" = $Account.samaccountname
+    $TableRow."samaccountname" = $Account.samaccountname
+    $TableRow.Enabled = $Account.Enabled
+    # Search for Account owners in domain
+    $AccountOwner = ""
+    $isFA = $FunctionalAccountReport | where {$_.IIQ_IDENTITY -eq "Active Directory DM0001-$($Account.samaccountname)"}
+    If ($isFA -and $isFA.CMDB_APP_MANAGER){
+        $AccountOwner = $isFA.CMDB_APP_MANAGER
+    }
+    #$D1 = $Domain1 | where {$_.Username -eq "Active Directory DM0001-$($Account.samaccountname)"}
+    #$AccountOwner = ""
+    #If ($D1 -and $D1.'Account Owner'){
+    #    $AccountOwner = $D1."Account Owner"
+    #}Else{
+    #   $D7 = $Domain7 | where {$_.Username -eq "Active Directory DM0007-$($Account.samaccountname)"}
+    #   if($D7 -and $D7.'Account Owner' -ne ""){
+    #        $AccountOwner = $D7."Account Owner"
+    #   }
+    #}
+
+    # Search for CIO and add to table row
+    if ($AccountOwner){
+        $CIO = $CIOReport | where {$_.Username -eq $AccountOwner}
+        if($CIO){
+            $TableRow."Account Owner" = $CIO."First Name" + " " + $CIO."Last Name" + " (" + $CIO.Username + ")"
+            $TableRow."CIO Direct" = $CIO.Manager
+        }
+    }
+
+    # Check to see if account is vaulted and assign pw policy
+    $isVaulted = $ManagedAccounts | where {$_.AccountName -eq $Account.samaccountname}
+    If($isVaulted){
+        $TableRow.Vaulted = $true
+        $TableRow."Account Created" = $Account.'Account Created' 
+        $TableRow."Auto-Managed" = $isVaulted[0].AutoManagementFlag
+        $TableRow."API-Enabled" = $isVaulted.ApiEnabled
+        #$TableRow."Last Rotation" = $isVaulted.LastChangeDate
+        If($isVaulted.PasswordRuleID -eq 3){
+        $TableRow."Password Rule" = "FITB Strong Password"
+        }
+        Elseif($isVaulted.PasswordRuleID -eq 2){
+        $TableRow."Password Rule" = "FITB Standard Password"
+        }
+        Elseif($isVaulted.PasswordRuleID -eq 1){
+        $TableRow."Password Rule" = "FITB Oracle Strong Password"
+        }
+        Else{
+        $TableRow."Password Rule" = "Default Password Policy"
+        }
+
+        }
+
+   # Check for survey results
+   $isSurveyReport = $SurveyReport | where {$_."Functional Account" -eq $Account.samaccountname}
+   if($isSurveyReport){
+    $TableRow."Account Type" = $isSurveyReport[0]."Account Type"
+   }
+
+   $isArcherException = $ArcherException | where {$_."name" -eq $Account.samaccountname}
+   if($isArcherException){
+    $TableRow."Archer Exception" = $isArcherException."Archer Exception"
+   }
+    
+    $KriReport+= $TableRow
+    }
+}
+$KriReport | Export-Csv -Path \\s1flokydcisap03\SecurityReports\PAM\KRI.csv 
